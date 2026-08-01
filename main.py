@@ -145,32 +145,33 @@ def main(_):
         for k, v in ec.value.items():
             if k != 'method' and k in agent_config:
                 agent_config[k] = v
-        # config.policy.awr_alpha maps onto agent_config['alpha'] explicitly (not via the generic
-        # name-match loop below) because 'alpha' means two unrelated things across agent families:
-        # iql/aciql's own agent config field 'alpha' is the AWR inverse temperature (this is what
-        # awr_alpha feeds), while acfql/cgq's agent config field 'alpha' is a BC/distillation
-        # coefficient set directly by config.value.alpha above (see acfql.py/cgq.py -- deliberately
-        # left named 'alpha' there, matching the actor-critic papers' own notation).
-        #
-        # NOTE: both config.policy.awr_alpha and config.value.alpha are declared unconditionally in
-        # base_experiment.py's template (with real defaults), so 'awr_alpha' in ec.policy is ALWAYS
-        # true regardless of ec.value.method -- an `in` membership check cannot tell iql/aciql runs
-        # apart from acfql/cgq runs the way it could when awr_alpha was merely "set or not." Route
-        # explicitly by agent family instead.
-        AWR_ALPHA_METHODS = ('iql', 'aciql')  # agents whose own 'alpha' field is the AWR temperature
-        if ec.value.method in AWR_ALPHA_METHODS and 'alpha' in agent_config:
-            agent_config['alpha'] = ec.policy.awr_alpha
-        for k, v in ec.policy.items():
-            if k not in ('method', 'awr_alpha') and k in agent_config:
-                agent_config[k] = v
-        # ec.policy.method itself is deliberately excluded from the loop above (agents have no
-        # 'method' field of their own -- that name is reserved for ec.value.method, which selects
-        # the agent module). It maps onto agent_config['policy_method'] instead, which is a
-        # distinct field some agents (iql, aciql, bc) expose to choose between AWR/gaussian and
-        # flow-matching-based policy extraction. Guarded so agents without this field (sarsa,
-        # acfql, fql) are unaffected.
+        # config.policy only ever configures agents that expose policy extraction as a first-class
+        # concept -- i.e. have a 'policy_method' field to switch between AWR/gaussian and
+        # flow-matching extraction (currently iql, aciql, bc). ACFQL/CGQ/DQC are joint actor-critic
+        # methods borrowed here for their critic objective only (CLAUDE.md); their own internal
+        # actor networks happen to reuse several of the SAME field names as config.policy's
+        # AWR-actor fields (actor_hidden_dims, actor_layer_norm, flow_steps, actor_num_samples) by
+        # coincidence, not by design. Letting config.policy touch those agents at all means any such
+        # name collision silently overrides config.value with config.policy's AWR-tuned default --
+        # this is exactly how config.value.alpha=300.0 got silently clobbered to config.policy's AWR
+        # default of 10.0 across four already-launched acfql training runs (found via
+        # flags.json inspection, not caught by review). Gating the whole block on 'policy_method' in
+        # agent_config, rather than allow-listing individual fields as each collision surfaces,
+        # closes the entire class at once: config.value is these agents' only route to their own
+        # config, matching CLAUDE.md's value/policy split ("value is the independent variable...
+        # policy... we're holding fixed").
         if 'policy_method' in agent_config:
             agent_config['policy_method'] = ec.policy.method
+            if 'alpha' in agent_config:
+                # iql/aciql's own 'alpha' field is the AWR inverse temperature -- config.policy's
+                # copy of this concept is named awr_alpha (not alpha) specifically so it can never
+                # collide with acfql/cgq's differently-meant 'alpha' (BC/distillation coefficient,
+                # set directly via config.value.alpha, never reachable from this branch since
+                # acfql/cgq have no policy_method field).
+                agent_config['alpha'] = ec.policy.awr_alpha
+            for k, v in ec.policy.items():
+                if k not in ('method', 'awr_alpha') and k in agent_config:
+                    agent_config[k] = v
         FLAGS.agent = agent_config
 
         if ec.exp_name is not None:
