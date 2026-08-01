@@ -9,7 +9,8 @@ import optax
 
 from utils.encoders import encoder_modules
 from utils.flax_utils import ModuleDict, TrainState, nonpytree_field
-from utils.networks import Actor, Value
+from utils.networks import Actor, ActorVectorField, Value
+from utils.flow_policy import flow_rejection_sample_actions, load_frozen_bc_flow_params
 
 
 class ACIQLAgent(flax.struct.PyTreeNode):
@@ -31,6 +32,21 @@ class ACIQLAgent(flax.struct.PyTreeNode):
     OLC-violation cost that grows with h as DQC/CGQ/QC-FQL (CLAUDE.md's chunked-critic vocabulary)
     -- this agent isolates whether chunking alone (with a safe bootstrap) gets the claimed
     horizon-reduction benefit, not a claim to the empty vertex of the three-way tradeoff.
+
+    Policy extraction (config['policy_method']) is independent of the above and defaults to the
+    AWR chunk policy described above for backward compatibility. Setting policy_method=
+    'flow_rejection' swaps in CLAUDE.md's Phase 1 target extraction instead: config['bc_checkpoint']
+    must point at an agents/bc.py flow-BC checkpoint (policy_method='flow') pretrained once,
+    externally, on this same dataset with horizon_length matching this agent's own -- see that
+    module's class docstring for why it must be pretrained and frozen rather than trained jointly
+    here (a shared eval-time policy across baselines is the whole point of CLAUDE.md's Phase 1
+    methodology; an independently-SGD'd copy per critic run would reintroduce exactly the confound
+    that's meant to eliminate). This agent never trains that policy -- it's loaded once in create()
+    and never receives a gradient afterward (same zero-gradient mechanism already used for
+    target_critic, just without even a polyak update), then used for best-of-N rejection sampling
+    over the flattened chunk against this agent's own (unmodified) critic; see utils/flow_policy.py.
+    Either way, value_loss/critic_loss above are completely unaffected -- only how a chunk gets
+    proposed from the learned Q changes.
     """
 
     rng: Any
@@ -109,11 +125,16 @@ class ACIQLAgent(flax.struct.PyTreeNode):
         for k, v in critic_info.items():
             info[f'critic/{k}'] = v
 
-        actor_loss, actor_info = self.actor_loss(batch, grad_params)
-        for k, v in actor_info.items():
-            info[f'actor/{k}'] = v
+        loss = value_loss + critic_loss
+        if self.config['policy_method'] == 'awr':
+            # 'flow_rejection' has nothing to train here -- config['bc_checkpoint'] is loaded once
+            # in create() and frozen (see class docstring), so there's no actor loss term at all in
+            # that mode, not just a different one.
+            actor_loss, actor_info = self.actor_loss(batch, grad_params)
+            for k, v in actor_info.items():
+                info[f'actor/{k}'] = v
+            loss = loss + actor_loss
 
-        loss = value_loss + critic_loss + actor_loss
         return loss, info
 
     def target_update(self, network, module_name):
@@ -150,6 +171,17 @@ class ACIQLAgent(flax.struct.PyTreeNode):
         existing eval loop's chunk-unpacking (reshape(-1, action_dim) into an action queue) works
         unchanged.
         """
+        if self.config['policy_method'] == 'flow_rejection':
+            full_action_dim = self.config['action_dim'] * self.config['horizon_length']
+            actor_bc_flow_fn = lambda o, x, t: self.network.select('actor_bc_flow')(o, x, t)
+            critic_fn = lambda o, a: self.network.select('critic')(o, actions=a)
+            return flow_rejection_sample_actions(
+                actor_bc_flow_fn, critic_fn, observations, rng,
+                num_samples=self.config['actor_num_samples'],
+                flow_steps=self.config['flow_steps'],
+                action_dim=full_action_dim,
+                q_agg=self.config['q_agg'],
+            )
         dist = self.network.select('actor')(observations, temperature=temperature)
         actions = dist.sample(seed=rng)
         actions = jnp.clip(actions, -1, 1)
@@ -190,7 +222,10 @@ class ACIQLAgent(flax.struct.PyTreeNode):
             encoder_module = encoder_modules[config['encoder']]
             encoders['value'] = encoder_module()
             encoders['critic'] = encoder_module()
-            encoders['actor'] = encoder_module()
+            if config['policy_method'] == 'flow_rejection':
+                encoders['actor_bc_flow'] = encoder_module()
+            else:
+                encoders['actor'] = encoder_module()
 
         # Define networks.
         value_def = Value(
@@ -205,21 +240,46 @@ class ACIQLAgent(flax.struct.PyTreeNode):
             num_ensembles=config['num_qs'],
             encoder=encoders.get('critic'),
         )
-        actor_def = Actor(
-            hidden_dims=config['actor_hidden_dims'],
-            action_dim=full_action_dim,
-            layer_norm=config['actor_layer_norm'],
-            state_dependent_std=False,
-            const_std=config['const_std'],
-            encoder=encoders.get('actor'),
-        )
 
         network_info = dict(
             value=(value_def, (ex_observations,)),
             critic=(critic_def, (ex_observations, full_actions)),
             target_critic=(copy.deepcopy(critic_def), (ex_observations, full_actions)),
-            actor=(actor_def, (ex_observations,)),
         )
+
+        if config['policy_method'] == 'flow_rejection':
+            assert config['bc_checkpoint'] is not None, (
+                "policy_method='flow_rejection' requires config['bc_checkpoint'] -- a pretrained "
+                "agents/bc.py flow-BC checkpoint path. This agent never trains that policy itself."
+            )
+            assert config['weight_decay'] == 0., (
+                "policy_method='flow_rejection' loads a frozen actor_bc_flow that must never "
+                "receive an update. Zero-gradient alone keeps plain Adam from moving it (same "
+                "mechanism as target_critic), but AdamW's decoupled weight decay is NOT "
+                "gradient-gated -- it would silently decay these loaded params toward zero every "
+                "step. Use weight_decay=0 for flow_rejection runs."
+            )
+            actor_bc_flow_def = ActorVectorField(
+                hidden_dims=config['bc_actor_hidden_dims'],
+                action_dim=full_action_dim,
+                layer_norm=False,  # explicit -- flow BC policy is never layer-normed
+                encoder=encoders.get('actor_bc_flow'),
+            )
+            ex_times = ex_actions[..., :1]
+            network_info['actor_bc_flow'] = (actor_bc_flow_def, (ex_observations, full_actions, ex_times))
+        elif config['policy_method'] == 'awr':
+            actor_def = Actor(
+                hidden_dims=config['actor_hidden_dims'],
+                action_dim=full_action_dim,
+                layer_norm=config['actor_layer_norm'],
+                state_dependent_std=False,
+                const_std=config['const_std'],
+                encoder=encoders.get('actor'),
+            )
+            network_info['actor'] = (actor_def, (ex_observations,))
+        else:
+            raise ValueError(f"Unknown policy_method: {config['policy_method']!r}")
+
         networks = {k: v[0] for k, v in network_info.items()}
         network_args = {k: v[1] for k, v in network_info.items()}
 
@@ -233,6 +293,22 @@ class ACIQLAgent(flax.struct.PyTreeNode):
 
         params = network.params
         params['modules_target_critic'] = params['modules_critic']
+
+        if config['policy_method'] == 'flow_rejection':
+            bc_actor_params = load_frozen_bc_flow_params(
+                config['bc_checkpoint'], ex_observations, ex_actions,
+                horizon_length=config['horizon_length'],
+                actor_hidden_dims=config['bc_actor_hidden_dims'],
+                seed=seed,
+            )
+            loaded_shape = jax.tree_util.tree_map(lambda x: x.shape, bc_actor_params)
+            expected_shape = jax.tree_util.tree_map(lambda x: x.shape, params['modules_actor_bc_flow'])
+            assert loaded_shape == expected_shape, (
+                f"BC checkpoint at {config['bc_checkpoint']!r} has architecture {loaded_shape}, "
+                f"expected {expected_shape} -- check bc_actor_hidden_dims/horizon_length match "
+                "what the checkpoint was actually trained with."
+            )
+            params['modules_actor_bc_flow'] = bc_actor_params
 
         config['ob_dims'] = ob_dims
         config['action_dim'] = action_dim
@@ -264,6 +340,23 @@ def get_config():
             horizon_length=ml_collections.config_dict.placeholder(int),  # Chunk length AND n-step
             # return length -- set by main.py, tied together by construction (matches acfql.py).
             weight_decay=0.,  # Weight decay.
+            truncate_reward_at_success=False,  # Once a step within the sampled h-step window
+            # reaches success (mask==0), freeze the reward sum there instead of continuing to
+            # accumulate whatever the raw (non-goal-directed) play data does afterward. Crucial for
+            # chunked/n-step targets specifically -- see utils/datasets.py's sample_sequence.
+            policy_method='awr',  # 'awr' | 'flow_rejection'. 'flow_rejection' loads a pretrained,
+            # frozen agents/bc.py flow-BC checkpoint (config['bc_checkpoint'], required) and
+            # extracts chunks via best-of-N rejection sampling against this agent's own
+            # already-trained critic, instead of AWR -- see class docstring for why this policy is
+            # pretrained externally rather than trained jointly here. value_loss/critic_loss are
+            # unaffected either way.
+            bc_checkpoint=ml_collections.config_dict.placeholder(str),  # Path to a pretrained
+            # agents/bc.py flow-BC params_*.pkl (policy_method='flow_rejection' only). Must have
+            # been trained on this same dataset/env with horizon_length==this agent's own.
+            bc_actor_hidden_dims=(512, 512, 512, 512),  # Architecture of the checkpoint at
+            # bc_checkpoint -- must match exactly what it was trained with (flow_rejection only).
+            flow_steps=10,  # Euler integration steps for the flow BC policy (flow_rejection only).
+            actor_num_samples=16,  # N candidates sampled for rejection sampling (flow_rejection only).
         )
     )
     return config

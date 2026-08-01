@@ -336,7 +336,12 @@ class CGQAgent(flax.struct.PyTreeNode):
         self,
         observations,
         rng=None,
+        temperature=1.0,
     ):
+        # temperature is accepted but unused: evaluation.py's actor_fn calls every agent's
+        # sample_actions with temperature= uniformly (it scales IQL/ACIQL's Gaussian actor std),
+        # but CGQ's actor is a deterministic flow/distillation actor with no equivalent knob.
+        del temperature
         if self.config["actor_type"] == "distill-ddpg":
             noises = jax.random.normal(
                 rng,

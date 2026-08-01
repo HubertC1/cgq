@@ -228,7 +228,7 @@ class Dataset(FrozenDict):
                 self.augment(batch, ['observations', 'next_observations'])
         return batch
 
-    def sample_sequence(self, batch_size, sequence_length, discount):
+    def sample_sequence(self, batch_size, sequence_length, discount, truncate_reward_at_success=False):
         idxs = np.random.randint(self.size - sequence_length + 1, size=batch_size)
         
         data = {k: v[idxs] for k, v in self.items()}
@@ -262,13 +262,30 @@ class Dataset(FrozenDict):
         rewards[:, 0] = batch_rewards[:, 0].squeeze()
         masks[:, 0] = batch_masks[:, 0].squeeze()
         terminals[:, 0] = batch_terminals[:, 0].squeeze()
-        
+
+        # success_hit tracks, per sample, whether any step so far in the window already reached
+        # success (mask==0). Raw per-step masks are NOT sticky -- the behavior data has no reason
+        # to linger at a goal it wasn't collected for, so it commonly passes through success and
+        # then drifts back to non-success within the same window. `masks` above is already sticky
+        # (running min), correctly zeroing the eventual bootstrap term forever once success occurs
+        # -- but without this flag, the reward sum keeps accumulating whatever the raw trajectory
+        # does *after* that point, which is off-policy drift, not signal. When enabled, this makes
+        # the reward sum sticky too: once success occurs, every later step in the window
+        # contributes 0, so the target becomes sum_{t=0}^{k} r_t (k = first success step) with no
+        # trailing negative reward and no bootstrap -- both halves of "stop counting at success."
+        success_hit = batch_masks[:, 0].squeeze() == 0
+
         discount_powers = discount ** np.arange(sequence_length)
         for i in range(1, sequence_length):
-            rewards[:, i] = rewards[:, i-1] + batch_rewards[:, i].squeeze() * discount_powers[i]
+            step_reward = batch_rewards[:, i].squeeze() * discount_powers[i]
+            if truncate_reward_at_success:
+                step_reward = np.where(success_hit, 0.0, step_reward)
+            rewards[:, i] = rewards[:, i-1] + step_reward
             masks[:, i] = np.minimum(masks[:, i-1], batch_masks[:, i].squeeze())
             terminals[:, i] = np.maximum(terminals[:, i-1], batch_terminals[:, i].squeeze())
             valid[:, i] = 1.0 - terminals[:, i-1]
+            if truncate_reward_at_success:
+                success_hit = success_hit | (batch_masks[:, i].squeeze() == 0)
         
         # Reorganize observations data format - maintain the exact same shape as the original function
         if len(batch_observations.shape) == 5:  # Visual data: (batch, seq, h, w, c)

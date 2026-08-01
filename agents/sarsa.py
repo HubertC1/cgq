@@ -28,8 +28,8 @@ class SARSAAgent(flax.struct.PyTreeNode):
     The `value` network here is NOT part of the critic's bootstrap (unlike IQL, where V feeds the
     critic's target) -- it's a secondary, purely diagnostic head, regressed with a *fixed* expectile
     of 0.5 (plain MSE, not a config knob) toward target_critic(s, a_data), so this agent exposes a
-    get_value(obs) in the same shape as iql.py's, for direct comparison via
-    scripts/render_value_map.py. Kostrikov et al. (IQL) note tau=0.5 recovers exactly this
+    get_value(obs) in the same shape as iql.py's, for direct comparison (e.g. via
+    evaluation.render_value_replay). Kostrikov et al. (IQL) note tau=0.5 recovers exactly this
     mean/SARSA-style backup, in contrast to tau>0.5's in-sample-max approximation.
 
     The actor is unweighted behavior cloning (no AWR / advantage weighting, no `alpha`) -- at eval

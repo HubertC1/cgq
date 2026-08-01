@@ -116,6 +116,9 @@ def make_ogbench_env_and_datasets(
         dataset_only=False,
         cur_env=None,
         add_info=False,
+        noise_cfg=None,
+        noise_seed=None,
+        eval_noise_seed=None,
         **env_kwargs,
 ):
     """Make OGBench environment and load datasets.
@@ -131,6 +134,11 @@ def make_ogbench_env_and_datasets(
         dataset_only: Whether to return only the dataset.
         cur_env: Current environment (only used when `dataset_only` is True).
         add_info: Whether to add observation information ('qpos', 'qvel', and 'button_states') to the datasets.
+        noise_cfg: (Optional) Action-space noise config dict (see envs.noise_wrapper.make_noise_cfg). If given,
+            `env` and `eval_env` are each wrapped with NoisyActionWrapper using their own seed below.
+        noise_seed: Noise seed for `env` (the training/rollout env). Required if `noise_cfg` is given.
+        eval_noise_seed: Noise seed for `eval_env`. Required if `noise_cfg` is given; must differ from
+            `noise_seed` so eval rollouts are not correlated with training/data noise realizations.
         **env_kwargs: Keyword arguments to pass to the environment.
     """
     # Make environment.
@@ -141,7 +149,17 @@ def make_ogbench_env_and_datasets(
     if 'singletask' in splits:
         # Single-task environment.
         pos = splits.index('singletask')
-        env_name = '-'.join(splits[: pos - 1] + splits[pos:])  # Remove the dataset type.
+        # Locomotion families (antmaze/pointmaze/humanoidmaze/antsoccer) insert a dataset-type tag
+        # ('navigate'/'stitch'/'explore'/'path') right before 'singletask', which is not part of
+        # the registered base env id and must be stripped. Manipulation families (cube/scene/puzzle)
+        # have no such tag -- the token there is part of the family name itself (e.g. 'quadruple' in
+        # cube-quadruple) and must be kept, or the derived id (e.g. 'cube-singletask-task1-v0')
+        # doesn't exist.
+        _LOCOMOTION_DATASET_TYPE_TAGS = {'navigate', 'stitch', 'explore', 'path'}
+        if splits[pos - 1] in _LOCOMOTION_DATASET_TYPE_TAGS:
+            env_name = '-'.join(splits[: pos - 1] + splits[pos:])  # Remove the dataset type.
+        else:
+            env_name = dataset_name  # No dataset-type tag to strip -- the id is already registered as-is.
         if not dataset_only:
             env = gymnasium.make(env_name, **env_kwargs)
             eval_env = gymnasium.make(env_name, **env_kwargs)
@@ -159,6 +177,18 @@ def make_ogbench_env_and_datasets(
         env_name = '-'.join(splits[:-2] + splits[-1:])  # Remove the dataset type.
         if not dataset_only:
             env = gymnasium.make(env_name, **env_kwargs)
+
+    if noise_cfg is not None and not dataset_only:
+        from envs.noise_wrapper import NoisyActionWrapper
+
+        assert noise_seed is not None and eval_noise_seed is not None, (
+            'noise_seed and eval_noise_seed are required when noise_cfg is given.'
+        )
+        assert noise_seed != eval_noise_seed, 'noise_seed and eval_noise_seed must differ.'
+        if env is not None:
+            env = NoisyActionWrapper(env, noise_cfg, noise_seed)
+        if eval_env is not None and eval_env is not env:
+            eval_env = NoisyActionWrapper(eval_env, noise_cfg, eval_noise_seed)
 
     if env_only:
         return env

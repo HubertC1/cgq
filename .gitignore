@@ -7,5 +7,9 @@ dist/
 .DS_Store
 .idea/
 .ruff_cache/
-exp/
+/exp/
 debug_scripts/
+data_gen_scripts/data/
+logs/
+wandb/
+renders/

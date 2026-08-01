@@ -186,7 +186,12 @@ class DQCAgent(flax.struct.PyTreeNode):
         observations,
         rng=None, # Change to rng
         best_of_n_override=None,
+        temperature=1.0,
     ):
+        # temperature is accepted but unused: evaluation.py's actor_fn calls every agent's
+        # sample_actions with temperature= uniformly (it scales IQL/ACIQL's Gaussian actor std),
+        # but DQC's actor is a deterministic flow actor with no equivalent knob.
+        del temperature
         seed = rng if rng is not None else self.rng
         """Sample actions from the actor."""
         def sample_fn(key):

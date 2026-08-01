@@ -167,8 +167,13 @@ class ACFQLAgent(flax.struct.PyTreeNode):
         self,
         observations,
         rng=None,
+        temperature=1.0,
     ):
-        
+        # temperature is accepted but unused: evaluation.py's actor_fn calls every agent's
+        # sample_actions with temperature= uniformly (it scales IQL/ACIQL's Gaussian actor std),
+        # but ACFQL's actor is a deterministic flow/distillation actor with no equivalent knob.
+        del temperature
+
         if self.config["actor_type"] == "distill-ddpg":
             noises = jax.random.normal(
                 rng,
@@ -207,6 +212,21 @@ class ACFQLAgent(flax.struct.PyTreeNode):
                 bshape + (action_dim,))
 
         return actions
+
+    @jax.jit
+    def get_value(self, observations, rng=None):
+        """V(s) approximated as Q(s, actor(s)) -- the eval-time actor's own action, not a grid-max
+        over the action box. ACFQL has no separate value head (only the state-action critic), so
+        this is diagnostic only (e.g. scripts/render_cube_value_replay.py), not used in the
+        critic/actor loss. Confounds "is the critic good" with "is the actor good" -- faithful to
+        what eval actually realizes, not the critic's own best-achievable reading.
+        """
+        rng = rng if rng is not None else self.rng
+        actions = self.sample_actions(observations, rng=rng)
+        qs = self.network.select('critic')(observations, actions=actions)
+        if self.config['q_agg'] == 'min':
+            return qs.min(axis=0)
+        return qs.mean(axis=0)
 
     @jax.jit
     def compute_flow_actions(

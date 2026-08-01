@@ -88,13 +88,19 @@ class FrameStackWrapper(gymnasium.Wrapper):
         return self.get_observation(), reward, terminated, truncated, info
 
 
-def make_env_and_datasets(env_name, frame_stack=None, action_clip_eps=1e-5):
+def make_env_and_datasets(env_name, frame_stack=None, action_clip_eps=1e-5, noise_cfg=None, noise_seed=None,
+                           eval_noise_seed=None):
     """Make offline RL environment and datasets.
 
     Args:
         env_name: Name of the environment or dataset.
         frame_stack: Number of frames to stack.
         action_clip_eps: Epsilon for action clipping.
+        noise_cfg: (Optional) Action-space noise config dict (see envs.noise_wrapper.make_noise_cfg). If given,
+            `env` and `eval_env` are each wrapped with NoisyActionWrapper using their own seed below.
+        noise_seed: Noise seed for `env` (the training/rollout env). Required if `noise_cfg` is given.
+        eval_noise_seed: Noise seed for `eval_env`. Required if `noise_cfg` is given; must differ from
+            `noise_seed` so eval rollouts are not correlated with training/data noise realizations.
 
     Returns:
         A tuple of the environment, evaluation environment, training dataset, and validation dataset.
@@ -104,6 +110,15 @@ def make_env_and_datasets(env_name, frame_stack=None, action_clip_eps=1e-5):
         # OGBench.
         env, train_dataset, val_dataset = ogbench.make_env_and_datasets(env_name)
         eval_env = ogbench.make_env_and_datasets(env_name, env_only=True)
+        if noise_cfg is not None:
+            from envs.noise_wrapper import NoisyActionWrapper
+
+            assert noise_seed is not None and eval_noise_seed is not None, (
+                'noise_seed and eval_noise_seed are required when noise_cfg is given.'
+            )
+            assert noise_seed != eval_noise_seed, 'noise_seed and eval_noise_seed must differ.'
+            env = NoisyActionWrapper(env, noise_cfg, noise_seed)
+            eval_env = NoisyActionWrapper(eval_env, noise_cfg, eval_noise_seed)
         env = EpisodeMonitor(env, filter_regexes=['.*privileged.*', '.*proprio.*'])
         eval_env = EpisodeMonitor(eval_env, filter_regexes=['.*privileged.*', '.*proprio.*'])
         train_dataset = Dataset.create(**train_dataset)
