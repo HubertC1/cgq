@@ -1,4 +1,4 @@
-import glob, tqdm, wandb, os, json, random, time, jax, flax, importlib, sys
+import glob, tqdm, wandb, os, json, random, re, time, jax, flax, importlib, sys
 from absl import app, flags
 from ml_collections import config_flags
 from log_utils import setup_wandb, get_exp_name, get_flag_dict, get_wandb_video,CsvLogger
@@ -298,10 +298,11 @@ def main(_):
         dataset_dirname = os.path.basename(os.path.normpath(FLAGS.ogbench_dataset_dir))
         if dataset_dirname == 'native':
             dataset_p_slip = 0.0
-        elif dataset_dirname.startswith('pslip'):
-            dataset_p_slip = float(dataset_dirname[len('pslip'):])
         else:
-            dataset_p_slip = None
+            # Regex (not a bare slice+float) so variant suffixes like 'pslip0.05_clonepeek' still
+            # parse -- the p_slip value is always the leading float right after 'pslip'.
+            m = re.match(r'pslip([\d.]+)', dataset_dirname)
+            dataset_p_slip = float(m.group(1)) if m else None
         if dataset_p_slip is not None:
             assert abs(dataset_p_slip - ec.task.slip.p_slip) < 1e-9, (
                 f"config.task.slip.p_slip={ec.task.slip.p_slip} does not match "
