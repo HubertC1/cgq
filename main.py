@@ -6,13 +6,6 @@ from log_utils import setup_wandb, get_exp_name, get_flag_dict, get_wandb_video,
 from envs.env_utils import make_env_and_datasets
 from envs.ogbench_utils import make_ogbench_env_and_datasets
 from envs.noise_wrapper import make_noise_cfg
-try:
-    import envs.spiral_maze  # noqa: registers pointmaze-spiral{R}-v0 envs
-except ModuleNotFoundError:
-    # envs/spiral_maze.py was never committed to git and is currently missing from disk (unrelated
-    # to any env family other than the paused pointmaze-spiral{R} horizon study) -- degrade
-    # gracefully rather than blocking every other env family's training on a missing file.
-    print('WARNING: envs.spiral_maze not found -- pointmaze-spiral{R}-v0 envs will not be registered.')
 
 from utils.flax_utils import save_agent, restore_agent_with_file
 from utils.datasets import Dataset, ReplayBuffer
