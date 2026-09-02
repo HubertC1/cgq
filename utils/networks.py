@@ -364,3 +364,124 @@ class QuantileValue(nn.Module):
 
         # Returns (num_ensembles, batch, num_atoms)
         return self.value_net(inputs)
+
+
+class TransformerBlock(nn.Module):
+    """Pre-LN Transformer block: causal self-attention + MLP, both residual.
+
+    Attributes:
+        hidden_dim: Token/residual-stream width.
+        num_heads: Number of attention heads.
+        mlp_ratio: MLP hidden width as a multiple of hidden_dim.
+        layer_norm: Whether to apply LayerNorm before each sub-block (pre-LN). If False, both
+            sub-blocks still get residual connections but skip normalization -- not recommended,
+            kept only for parity with this file's other modules' layer_norm toggle.
+    """
+
+    hidden_dim: int
+    num_heads: int
+    mlp_ratio: int = 4
+    layer_norm: bool = True
+
+    @nn.compact
+    def __call__(self, x, mask):
+        norm = nn.LayerNorm if self.layer_norm else Identity
+        h = norm()(x)
+        attn = nn.SelfAttention(num_heads=self.num_heads, qkv_features=self.hidden_dim, out_features=self.hidden_dim)(
+            h, mask=mask
+        )
+        x = x + attn
+        h = norm()(x)
+        h = nn.Dense(self.hidden_dim * self.mlp_ratio)(h)
+        h = nn.gelu(h)
+        h = nn.Dense(self.hidden_dim)(h)
+        x = x + h
+        return x
+
+
+class CausalChunkQTransformer(nn.Module):
+    """Causal-Transformer chunked Q-network (ACSAC, arXiv:2605.11009, Sec 4.1).
+
+    Tokenizes a state and an H-length action chunk as [state, a_1, ..., a_H] (H = max(chunk_sizes)),
+    runs them through a causal Transformer (position h's representation depends only on
+    state, a_1, ..., a_h -- never a_{h+1:}), and reads a scalar Q_h(s, a_{1:h}) off each requested
+    head-position h via one *shared* linear read-out applied per-token-position (not a separate head
+    per h -- the positions differ in what they causally see, not in which weights read them out).
+    One forward pass over the full H-length chunk yields every requested head simultaneously.
+
+    Attributes:
+        chunk_sizes: Head positions to read out, e.g. (16, 8, 4, 2, 1). Need not be contiguous or
+            sorted (sorting only matters to callers, not to this module) -- every h must satisfy
+            1 <= h <= max(chunk_sizes).
+        hidden_dim: Token width.
+        num_layers: Number of TransformerBlocks.
+        num_heads: Attention heads per block.
+        mlp_ratio: Per-block MLP hidden width as a multiple of hidden_dim.
+        layer_norm: Whether TransformerBlocks use pre-LN.
+        encoder: Optional encoder module for the observation, applied before tokenization.
+    """
+
+    chunk_sizes: Sequence[int]
+    hidden_dim: int = 128
+    num_layers: int = 2
+    num_heads: int = 8
+    mlp_ratio: int = 4
+    layer_norm: bool = True
+    encoder: nn.Module = None
+
+    def setup(self):
+        self.horizon = max(self.chunk_sizes)
+        self.state_proj = nn.Dense(self.hidden_dim, kernel_init=default_init())
+        self.action_proj = nn.Dense(self.hidden_dim, kernel_init=default_init())
+        self.pos_embed = self.param('pos_embed', nn.initializers.normal(0.02), (self.horizon + 1, self.hidden_dim))
+        self.blocks = [
+            TransformerBlock(hidden_dim=self.hidden_dim, num_heads=self.num_heads, mlp_ratio=self.mlp_ratio, layer_norm=self.layer_norm)
+            for _ in range(self.num_layers)
+        ]
+        self.final_norm = nn.LayerNorm() if self.layer_norm else Identity()
+        self.q_head = nn.Dense(1, kernel_init=default_init(1e-2))
+
+    def all_positions(self, observations, actions):
+        """Compute Q at *every* position 0..horizon in one forward pass (position 0 is the state
+        token and is meaningless -- kept only so index h directly means "Q_h" with no off-by-one).
+
+        Args:
+            observations: (..., obs_dim).
+            actions: (..., horizon, action_dim) -- the full H-length action chunk. Only the first h
+                actions causally influence position h's output; positions after h are
+                architecturally invisible to it (see scripts/test_causal_chunk_q_transformer.py).
+
+        Returns:
+            Array of shape (..., horizon + 1). Exposed as a separate method (rather than folded into
+            __call__) so callers needing a *traced* (e.g. randomly-sampled) head index can gather
+            straight out of this array -- a Python dict, as __call__ returns, can only be keyed by a
+            static Python int.
+        """
+        if self.encoder is not None:
+            observations = self.encoder(observations)
+        state_tok = self.state_proj(observations)[..., None, :]  # (..., 1, hidden_dim)
+        action_tok = self.action_proj(actions)  # (..., horizon, hidden_dim)
+        x = jnp.concatenate([state_tok, action_tok], axis=-2)  # (..., horizon + 1, hidden_dim)
+        x = x + self.pos_embed  # broadcasts over leading batch dims
+
+        mask = nn.make_causal_mask(jnp.ones(x.shape[:-1]))
+        for block in self.blocks:
+            x = block(x, mask=mask)
+        x = self.final_norm(x)
+
+        return self.q_head(x).squeeze(-1)  # (..., horizon + 1)
+
+    def __call__(self, observations, actions):
+        """Compute Q_h(s, a_{1:h}) for every h in chunk_sizes in one forward pass.
+
+        Args:
+            observations: (..., obs_dim).
+            actions: (..., horizon, action_dim) -- the full H-length action chunk.
+
+        Returns:
+            Dict[int, Array] mapping each h in chunk_sizes to Q_h, shape (...,) matching observations'
+            batch shape. A dict (not a stacked array) because chunk_sizes need not be contiguous or
+            evenly spaced, so there's no natural axis to stack along without re-deriving h from index.
+        """
+        q_all = self.all_positions(observations, actions)
+        return {h: q_all[..., h] for h in self.chunk_sizes}

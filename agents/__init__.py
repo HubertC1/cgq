@@ -8,6 +8,8 @@ from agents.iql import IQLAgent
 from agents.aciql import ACIQLAgent
 from agents.sarsa import SARSAAgent
 from agents.bc import BCAgent
+from agents.curriculum_qchunk import CurriculumQChunkAgent
+from agents.curriculum_transformer_q import CurriculumTransformerQAgent
 agents = dict(
     acfql=ACFQLAgent,
     dqc=DQCAgent,
@@ -19,4 +21,6 @@ agents = dict(
     aciql=ACIQLAgent,
     sarsa=SARSAAgent,
     bc=BCAgent,
+    curriculum_qchunk=CurriculumQChunkAgent,
+    curriculum_transformer_q=CurriculumTransformerQAgent,
 )

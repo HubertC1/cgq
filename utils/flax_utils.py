@@ -25,11 +25,18 @@ class ModuleDict(nn.Module):
     modules: Dict[str, nn.Module]
 
     @nn.compact
-    def __call__(self, *args, name=None, **kwargs):
+    def __call__(self, *args, name=None, method_name=None, **kwargs):
         """Forward pass.
 
         For initialization, call with `name=None` and provide the arguments for each module in `kwargs`.
         Otherwise, call with `name=<module_name>` and provide the arguments for that module.
+
+        `method_name`, when given (only valid together with `name`), calls that named method on the
+        selected submodule instead of its default `__call__` -- e.g. for a submodule that exposes
+        more than one public entry point (CausalChunkQTransformer.all_positions alongside its
+        __call__). Distinct from TrainState.__call__'s own `method` kwarg, which selects a method on
+        this ModuleDict itself (via flax's `.apply(method=...)`, looked up before this method even
+        runs) -- that mechanism can't reach a submodule's alternate method, which is what this is for.
         """
         if name is None:
             if kwargs.keys() != self.modules.keys():
@@ -47,7 +54,10 @@ class ModuleDict(nn.Module):
                     out[key] = self.modules[key](value)
             return out
 
-        return self.modules[name](*args, **kwargs)
+        module = self.modules[name]
+        if method_name is not None:
+            return getattr(module, method_name)(*args, **kwargs)
+        return module(*args, **kwargs)
 
 
 class TrainState(flax.struct.PyTreeNode):
