@@ -10,6 +10,7 @@ from agents.sarsa import SARSAAgent
 from agents.bc import BCAgent
 from agents.curriculum_qchunk import CurriculumQChunkAgent
 from agents.curriculum_transformer_q import CurriculumTransformerQAgent
+from agents.cgq_transformer_q import CGQTransformerQAgent
 agents = dict(
     acfql=ACFQLAgent,
     dqc=DQCAgent,
@@ -23,4 +24,5 @@ agents = dict(
     bc=BCAgent,
     curriculum_qchunk=CurriculumQChunkAgent,
     curriculum_transformer_q=CurriculumTransformerQAgent,
+    cgq_transformer_q=CGQTransformerQAgent,
 )
