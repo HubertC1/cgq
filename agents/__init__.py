@@ -11,6 +11,7 @@ from agents.bc import BCAgent
 from agents.curriculum_qchunk import CurriculumQChunkAgent
 from agents.curriculum_transformer_q import CurriculumTransformerQAgent
 from agents.cgq_transformer_q import CGQTransformerQAgent
+from agents.tdcgq import TDCGQAgent
 agents = dict(
     acfql=ACFQLAgent,
     dqc=DQCAgent,
@@ -25,4 +26,5 @@ agents = dict(
     curriculum_qchunk=CurriculumQChunkAgent,
     curriculum_transformer_q=CurriculumTransformerQAgent,
     cgq_transformer_q=CGQTransformerQAgent,
+    tdcgq=TDCGQAgent,
 )
