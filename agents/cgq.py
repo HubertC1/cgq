@@ -224,16 +224,22 @@ class CGQAgent(flax.struct.PyTreeNode):
         for k, v in actor_info.items():
             info[f'chunk_actor/{k}'] = v
 
-        step_critic_loss, step_critic_info = self.step_critic_loss(batch, grad_params, step_critic_rng)
-        for k, v in step_critic_info.items():
-            info[f'step_critic/{k}'] = v
+        loss = chunk_critic_loss + chunk_actor_loss
 
-        step_actor_loss, step_actor_info = self.step_actor_loss(batch, grad_params, step_actor_rng)
-        for k, v in step_actor_info.items():
-            info[f'step_actor/{k}'] = v
+        if self.config['train_step_critic']:
+            step_critic_loss, step_critic_info = self.step_critic_loss(batch, grad_params, step_critic_rng)
+            for k, v in step_critic_info.items():
+                info[f'step_critic/{k}'] = v
 
-        
-        loss = chunk_critic_loss + chunk_actor_loss + step_critic_loss + step_actor_loss
+            step_actor_loss, step_actor_info = self.step_actor_loss(batch, grad_params, step_actor_rng)
+            for k, v in step_actor_info.items():
+                info[f'step_actor/{k}'] = v
+
+            loss = loss + step_critic_loss + step_actor_loss
+        # else: step_critic/step_actor params still exist (created in `create()`) but receive no
+        # gradient at all, so they stay frozen at random init -- config['eval_policy'] must be
+        # 'chunk' in this mode (asserted in `create()`) since the step_actor is never trained.
+
         return loss, info
 
     def target_update(self, network, module_name):
@@ -255,7 +261,10 @@ class CGQAgent(flax.struct.PyTreeNode):
 
         new_network, info = agent.network.apply_loss_fn(loss_fn=loss_fn)
         agent.target_update(new_network, 'chunk_critic')
-        agent.target_update(new_network, 'step_critic')
+        if agent.config['train_step_critic']:
+            # No-op when False: step_critic's params never move (see total_loss), so blending
+            # them into their target is a wasted tree_map, not just a correctness non-issue.
+            agent.target_update(new_network, 'step_critic')
         return agent.replace(network=new_network, rng=new_rng), info
 
     @jax.jit
@@ -342,6 +351,16 @@ class CGQAgent(flax.struct.PyTreeNode):
         # sample_actions with temperature= uniformly (it scales IQL/ACIQL's Gaussian actor std),
         # but CGQ's actor is a deterministic flow/distillation actor with no equivalent knob.
         del temperature
+
+        if self.config['eval_policy'] == 'chunk':
+            # Bypass the step_actor entirely and deploy the h-step Q-chunking policy open-loop --
+            # evaluation.py/main.py already know how to consume an action-chunk-shaped result
+            # (reshape(-1, action_dim), then execute each action before re-querying the policy),
+            # since that's exactly what acfql/dqc's own sample_actions returns. Pairs with
+            # config['train_step_critic']=False (see total_loss/create) to run CGQ as a pure
+            # Q-chunking baseline with no step-critic training or influence at all.
+            return self.sample_chunk_actions(observations, rng=rng)
+
         if self.config["actor_type"] == "distill-ddpg":
             noises = jax.random.normal(
                 rng,
@@ -411,6 +430,13 @@ class CGQAgent(flax.struct.PyTreeNode):
             ex_actions: Example batch of actions.
             config: Configuration dictionary.
         """
+        assert config['train_step_critic'] or config['eval_policy'] == 'chunk', (
+            "config['train_step_critic']=False leaves step_actor at its random init (see "
+            "total_loss: its loss is never added to the trained total, so it gets zero "
+            "gradient) -- config['eval_policy'] must be 'chunk' in that mode, or sample_actions "
+            "would evaluate an untrained policy."
+        )
+
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng, 2)
 
@@ -547,10 +573,22 @@ def get_config():
             use_fourier_features=False,
             fourier_feature_dim=64,
             weight_decay=0.,
+            anchor_loss_type="expectile",  # "expectile" (regress Q(s,a_1) towards chunk critic) or "td" (TD-guided: regress Q(s',a_H) towards the implied bootstrap value)
             anchor_expectile=0.95,
             step_critic_type="actor-critic",  # "SARSA" or "actor-critic"
             beta= 0.01,  # anchor loss coefficient
             td_loss=1.0,  # td loss coefficient
+            train_step_critic=True,  # False -> skip step_critic_loss/step_actor_loss entirely
+            # (they never enter the trained total_loss, so those params get zero gradient and
+            # stay at random init) -- for isolating the chunk critic/actor's own behavior with no
+            # step-critic training or influence at all. Requires eval_policy='chunk' (asserted in
+            # create()), since the untrained step_actor is otherwise what sample_actions would run.
+            eval_policy='step',  # 'step' (default: step_actor_onestep_flow, CGQ's usual 1-step
+            # eval policy) or 'chunk' (sample_chunk_actions -- deploy the h-step Q-chunking policy
+            # open-loop, exactly like acfql/dqc's own sample_actions; evaluation.py/main.py already
+            # know how to consume a chunk-shaped action). Independent of train_step_critic in
+            # principle (e.g. train both, still eval with the chunk policy to inspect it), but the
+            # reverse combination (train_step_critic=False, eval_policy='step') is asserted against.
         )
     )
     return config
