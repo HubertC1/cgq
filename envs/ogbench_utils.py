@@ -155,7 +155,7 @@ def make_ogbench_env_and_datasets(
         # have no such tag -- the token there is part of the family name itself (e.g. 'quadruple' in
         # cube-quadruple) and must be kept, or the derived id (e.g. 'cube-singletask-task1-v0')
         # doesn't exist.
-        _LOCOMOTION_DATASET_TYPE_TAGS = {'navigate', 'stitch', 'explore', 'path'}
+        _LOCOMOTION_DATASET_TYPE_TAGS = {'navigate', 'stitch', 'explore', 'path', 'diagstitch'}
         if splits[pos - 1] in _LOCOMOTION_DATASET_TYPE_TAGS:
             env_name = '-'.join(splits[: pos - 1] + splits[pos:])  # Remove the dataset type.
         else:
