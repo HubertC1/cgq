@@ -164,6 +164,7 @@ def evaluate(
 
         if i < num_eval_episodes:
             add_to(stats, flatten(info))
+            add_to(stats, {'episode_length': step})  # MDP steps taken this episode (until done)
             trajs.append(traj)
         else:
             renders.append(np.array(render))

@@ -119,6 +119,15 @@ def get_config():
     # --- train: schedule ---
     config.train = ml_collections.ConfigDict()
     config.train.offline_steps = 1_000_000
+    config.train.eval_episodes = None  # None -> main.py's --eval_episodes default (50). Worth
+    # lowering on envs with a long max_episode_steps: a failed episode runs the full cap, so on
+    # e.g. pointmaze-umazelarge (cap 6000) 50 episodes cost 300k env steps *per eval*.
+    config.train.video_episodes = None  # None -> main.py's --video_episodes default (1).
+    config.train.num_eval_seeds = None  # None -> main.py's --num_eval_seeds default (5).
+    config.train.value_map_interval = None  # None -> main.py's --value_map_interval (0/off).
+    # Set to eval_interval to push the learned-vs-oracle value/action diagnostic figure to
+    # wandb at every eval (2-D pointmaze only; see utils/maze_oracle.diagnostic_figure).
+    # Eval cost is linear in this: it re-runs the whole eval_episodes batch per seed.
     config.train.eval_interval = 100_000
     config.train.save_interval = 100_000  # tied to eval_interval -- one checkpoint saved per eval
     # (see main.py's FLAGS.max_checkpoints, raised from 1 to 20 so these don't get pruned mid-run)

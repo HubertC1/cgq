@@ -10,6 +10,8 @@ from envs.noise_wrapper import make_noise_cfg
 from utils.flax_utils import save_agent, restore_agent_with_file
 from utils.datasets import Dataset, ReplayBuffer
 from utils.run_registry import flatten, upsert_run
+from utils.maze_oracle import make_value_probe, value_error_stats, action_agreement_stats,\
+    diagnostic_figure
 
 from evaluation import evaluate_multi_seed, render_value_replay
 from agents import agents
@@ -54,6 +56,7 @@ flags.DEFINE_integer('num_eval_seeds', 5, 'Number of independent eval seeds per 
                       'each checkpoint, logged under the same key plus _std/_min/_max suffixes.')
 flags.DEFINE_integer('video_episodes', 1, 'Number of video episodes for each task.')
 flags.DEFINE_integer('video_frame_skip', 3, 'Frame skip for videos.')
+flags.DEFINE_integer('value_map_interval', 0, 'Log the learned-vs-oracle value/action diagnostic figure to wandb every N steps (0 = never; set to eval_interval to get one per eval). 2-D pointmaze only.')
 
 # It is related to the function get_config
 config_flags.DEFINE_config_file('agent', default='agents/bb.py', lock_config=False)
@@ -128,6 +131,14 @@ def main(_):
         FLAGS.offline_steps = ec.train.offline_steps
         FLAGS.eval_interval = ec.train.eval_interval
         FLAGS.save_interval = ec.train.save_interval
+        if ec.train.get('eval_episodes', None) is not None:
+            FLAGS.eval_episodes = ec.train.eval_episodes
+        if ec.train.get('video_episodes', None) is not None:
+            FLAGS.video_episodes = ec.train.video_episodes
+        if ec.train.get('num_eval_seeds', None) is not None:
+            FLAGS.num_eval_seeds = ec.train.num_eval_seeds
+        if ec.train.get('value_map_interval', None) is not None:
+            FLAGS.value_map_interval = ec.train.value_map_interval
         FLAGS.dataset_replace_interval = ec.train.dataset_replace_interval
 
         # value.method selects agents/{method}.py; value/policy fields overlay that agent's
@@ -370,6 +381,19 @@ def main(_):
         config,
     )
 
+    # Exact-V* probe for logging critic value error (2-D pointmaze family only; None elsewhere, so
+    # every other env is unaffected). These mazes are deterministic with -1-per-step reward, so
+    # V*(s) is closed-form given the geodesic distance -- see utils/maze_oracle.py.
+    try:
+        eval_env.reset(seed=FLAGS.seed)
+        value_probe = make_value_probe(eval_env, FLAGS.discount, resolution=0.5, seed=FLAGS.seed)
+    except Exception as e:  # never let a diagnostic take down a training run
+        print(f'value probe unavailable ({type(e).__name__}: {e}); skipping value-error logging')
+        value_probe = None
+    if value_probe is not None:
+        print(f"value-error probe: {len(value_probe['observations']):,} states, "
+              f"V* in [{value_probe['v_star'].min():.1f}, {value_probe['v_star'].max():.1f}]")
+
     start_step = 0
     if FLAGS.resume:
         chkpts = glob.glob(os.path.join(FLAGS.save_dir, 'params_*.pkl'))
@@ -486,6 +510,16 @@ def main(_):
                 )
                 logger.log(eval_info, "eval", step=log_step)
                 last_eval_info = eval_info
+                if value_probe is not None:
+                    logger.log(value_error_stats(agent, config, value_probe,
+                                                 seed=FLAGS.eval_noise_seed), "eval", step=log_step)
+                    agree, maps = action_agreement_stats(agent, config, value_probe,
+                                                         seed=FLAGS.eval_noise_seed, return_maps=True)
+                    logger.log(agree, "eval", step=log_step)
+                    if FLAGS.value_map_interval > 0 and log_step % FLAGS.value_map_interval == 0:
+                        img = diagnostic_figure(agent, config, value_probe, eval_env, maps=maps)
+                        if img is not None:
+                            wandb.log({'value_map': wandb.Image(img)}, step=log_step)
                 if want_video:
                     if use_value_replay:
                         composite_frames, _, _ = render_value_replay(
@@ -608,6 +642,16 @@ def main(_):
 
                 logger.log(eval_info, "eval", step=log_step)
                 last_eval_info = eval_info
+                if value_probe is not None:
+                    logger.log(value_error_stats(agent, config, value_probe,
+                                                 seed=FLAGS.eval_noise_seed), "eval", step=log_step)
+                    agree, maps = action_agreement_stats(agent, config, value_probe,
+                                                         seed=FLAGS.eval_noise_seed, return_maps=True)
+                    logger.log(agree, "eval", step=log_step)
+                    if FLAGS.value_map_interval > 0 and log_step % FLAGS.value_map_interval == 0:
+                        img = diagnostic_figure(agent, config, value_probe, eval_env, maps=maps)
+                        if img is not None:
+                            wandb.log({'value_map': wandb.Image(img)}, step=log_step)
                 if want_video:
                     if use_value_replay:
                         composite_frames, _, _ = render_value_replay(
